@@ -1,0 +1,5 @@
+{
+  "name": "Biomax Attendance Bridge",
+  "description": "Enterprise-grade attendance synchronization between Biomax biometric devices and Supabase database.",
+  "requestFramePermissions": []
+}
