@@ -15,7 +15,9 @@ import {
   History,
   Terminal,
   Plus,
-  Trash2
+  Trash2,
+  Cloud,
+  CloudOff
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -88,8 +90,10 @@ export default function App() {
   const [recentLogs, setRecentLogs] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<"sync" | "history">("sync");
   const [isSyncingUsers, setIsSyncingUsers] = useState(false);
-  const [isRealtimeEnabled, setIsRealtimeEnabled] = useState(false);
+  const [isRealtimeEnabled, setIsRealtimeEnabled] = useState(true);
+  const [isSbConnected, setIsSbConnected] = useState<boolean | null>(null);
   const [lastNotificationTime, setLastNotificationTime] = useState<number>(0);
+  const lastSyncedTimes = useRef<Record<string, string>>({});
   const [dateRange, setDateRange] = useState({
     from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split("T")[0],
     to: new Date().toISOString().split("T")[0],
@@ -100,6 +104,29 @@ export default function App() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [syncLogs]);
+
+  useEffect(() => {
+    if (isConfigured && !token) {
+      login();
+      checkSbConnection();
+    }
+  }, [isConfigured]);
+
+  const checkSbConnection = async () => {
+    try {
+      if (!SB_URL || !SB_KEY) {
+        setIsSbConnected(false);
+        return;
+      }
+      const res = await fetch(`${SB_URL}/rest/v1/`, {
+        headers: getSbHeaders(),
+      });
+      setIsSbConnected(res.ok);
+    } catch (err) {
+      console.error("Supabase connection check failed", err);
+      setIsSbConnected(false);
+    }
+  };
 
   const addLog = (message: string, type: SyncLog["type"] = "info") => {
     setSyncLogs((prev) => [
@@ -269,7 +296,7 @@ export default function App() {
     }
   };
 
-  const login = async () => {
+  const login = async (retryCount = 0) => {
     try {
       addLog("Authenticating with Biomax API...", "info");
       const res = await fetch("/api/biomax/Auth/Login", {
@@ -293,6 +320,11 @@ export default function App() {
       }
     } catch (err: any) {
       addLog(`Login failed: ${err.message}`, "error");
+      if (retryCount < 5) {
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+        addLog(`Retrying in ${delay/1000}s... (Attempt ${retryCount + 1}/5)`, "warning");
+        setTimeout(() => login(retryCount + 1), delay);
+      }
     }
   };
 
@@ -385,6 +417,15 @@ export default function App() {
       const deviceLogs = Array.isArray(rawLogs) ? rawLogs.filter((l: any) => l.DeviceKey === device.DeviceKey) : [];
       
       if (deviceLogs.length > 0) {
+        // Sort logs by time ascending to process them in order
+        const sortedLogs = [...deviceLogs].sort((a, b) => new Date(a.IOTime).getTime() - new Date(b.IOTime).getTime());
+        const lastSyncedTime = lastSyncedTimes.current[device.DeviceKey];
+        
+        // Filter for truly new logs to notify
+        const newLogs = lastSyncedTime 
+          ? sortedLogs.filter(l => new Date(l.IOTime).getTime() > new Date(lastSyncedTime).getTime())
+          : sortedLogs;
+
         const sbData = deviceLogs.map((l: any) => ({
           device_key: l.DeviceKey,
           device_name: l.DeviceName,
@@ -400,15 +441,25 @@ export default function App() {
 
         await sbUpsert("biomax_attendance_logs", sbData, "device_key,user_id,io_time");
         
-        // Only notify if there are new records
-        if (isAuto) {
-          const latestLog = deviceLogs[0];
-          showNotification("New Attendance Detected", `${latestLog.UserName} punched at ${latestLog.IOTime} on ${device.Name}`);
+        // Update last synced time
+        if (sortedLogs.length > 0) {
+          lastSyncedTimes.current[device.DeviceKey] = sortedLogs[sortedLogs.length - 1].IOTime;
         }
 
-        addLog(`${prefix}Synced ${deviceLogs.length} records for ${device.Name}`, "success");
-        fetchRecentLogs();
-        fetchStats();
+        // Only notify for truly new records
+        if (isAuto && newLogs.length > 0) {
+          const latestLog = newLogs[newLogs.length - 1];
+          showNotification(
+            `New Attendance (${newLogs.length})`, 
+            `${latestLog.UserName} punched at ${latestLog.IOTime} on ${device.Name}`
+          );
+        }
+
+        if (!isAuto || newLogs.length > 0) {
+          addLog(`${prefix}Synced ${deviceLogs.length} records for ${device.Name}${newLogs.length > 0 ? ` (${newLogs.length} new)` : ''}`, "success");
+          fetchRecentLogs();
+          fetchStats();
+        }
       }
     } catch (err: any) {
       addLog(`${prefix}Sync failed for ${device.Name}: ${err.message}`, "error");
@@ -465,6 +516,22 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-3">
+            {isSbConnected === null ? (
+              <div className="hidden md:flex items-center gap-2 bg-white/5 text-zinc-500 px-3 py-1.5 rounded-lg text-[10px] font-bold border border-white/5">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                Supabase: Checking
+              </div>
+            ) : isSbConnected ? (
+              <div className="hidden md:flex items-center gap-2 bg-emerald-500/10 text-emerald-400 px-3 py-1.5 rounded-lg text-[10px] font-bold border border-emerald-500/20">
+                <Cloud className="w-3 h-3" />
+                Supabase: Online
+              </div>
+            ) : (
+              <div className="hidden md:flex items-center gap-2 bg-red-500/10 text-red-400 px-3 py-1.5 rounded-lg text-[10px] font-bold border border-red-500/20">
+                <CloudOff className="w-3 h-3" />
+                Supabase: Offline
+              </div>
+            )}
             {isRealtimeEnabled && (
               <div className="hidden md:flex items-center gap-2 bg-indigo-500/10 text-indigo-400 px-3 py-1.5 rounded-lg text-[10px] font-bold border border-indigo-500/20">
                 <RefreshCw className="w-3 h-3 animate-spin" />
@@ -472,13 +539,10 @@ export default function App() {
               </div>
             )}
             {!token ? (
-              <button 
-                onClick={login}
-                className="bg-white text-black px-5 py-2 rounded-xl text-sm font-bold hover:bg-zinc-200 transition-all flex items-center gap-2"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                Connect API
-              </button>
+              <div className="flex items-center gap-2 bg-amber-500/10 text-amber-500 px-4 py-2 rounded-xl text-xs font-bold border border-amber-500/20">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                Connecting...
+              </div>
             ) : (
               <div className="flex items-center gap-2 bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-xl text-xs font-bold border border-emerald-500/20">
                 <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
@@ -618,15 +682,15 @@ export default function App() {
                     </div>
                     
                     <div className="flex items-center gap-3 bg-black/40 p-1.5 rounded-2xl border border-white/5">
+                      <div className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        Real-time Always On
+                      </div>
                       <button 
-                        onClick={() => {
-                          if (!isRealtimeEnabled) requestNotificationPermission();
-                          setIsRealtimeEnabled(!isRealtimeEnabled);
-                        }}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${isRealtimeEnabled ? 'bg-indigo-600 text-white' : 'bg-white/5 text-zinc-500 hover:bg-white/10'}`}
+                        onClick={requestNotificationPermission}
+                        className="px-4 py-2 rounded-xl text-xs font-bold bg-white/5 text-zinc-400 hover:bg-white/10 transition-all border border-white/5"
                       >
-                        <RefreshCw className={`w-3 h-3 ${isRealtimeEnabled ? 'animate-spin' : ''}`} />
-                        {isRealtimeEnabled ? 'Real-time On' : 'Real-time Off'}
+                        Enable Alerts
                       </button>
                       <div className="w-px h-4 bg-white/10" />
                       <div className="px-4 py-2 flex items-center gap-2">
