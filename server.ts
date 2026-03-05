@@ -12,15 +12,14 @@ const BIOMAX_URL = process.env.BIOMAX_API_URL || "http://43.225.52.40:81";
 app.use(express.json());
 
 // Proxy for Biomax API to handle CORS and centralize auth
-app.all(["/api/biomax/*", "/api/biometric/*"], async (req, res) => {
+app.all("/api/biomax/*", async (req, res) => {
   const path = req.params[0];
   const method = req.method;
   
-  // Handle the case where the path might start with /api/ again from the frontend
-  const cleanPath = path.startsWith("api/") ? path.substring(4) : path;
-  const targetUrl = `${BIOMAX_URL}/api/${cleanPath}`;
-
-  console.log(`[Proxy] ${method} ${req.url} -> ${targetUrl}`);
+  // Use dynamic URL from header if provided, otherwise fallback to default
+  const dynamicUrl = req.headers["x-biomax-url"] as string;
+  const baseUrl = dynamicUrl || BIOMAX_URL;
+  const targetUrl = `${baseUrl}/api/${path}`;
 
   try {
     const response = await axios({
@@ -28,20 +27,18 @@ app.all(["/api/biomax/*", "/api/biometric/*"], async (req, res) => {
       method,
       data: req.body,
       params: req.query,
-      validateStatus: () => true, // Pass through all status codes
       headers: {
-        'Accept': '*/*',
-        'Content-Type': 'application/json',
+        ...req.headers,
+        host: new URL(baseUrl).host,
         // Forward authorization if present
         ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
       },
       timeout: 30000,
     });
 
-    console.log(`[Proxy] Response: ${response.status}`);
     res.status(response.status).json(response.data);
   } catch (error: any) {
-    console.error(`[Proxy] Error [${method}] ${path}:`, error.message);
+    console.error(`Biomax Proxy Error [${method}] ${path}:`, error.message);
     res.status(error.response?.status || 500).json(error.response?.data || { error: error.message });
   }
 });

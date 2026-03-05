@@ -44,8 +44,12 @@ interface SyncLog {
 // --- Supabase Helpers ---
 const SB_URL = "https://eftrwmyefqnerqdgidbm.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVmdHJ3bXllZnFuZXJxZGdpZGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc3MjE0MzQsImV4cCI6MjA4MzI5NzQzNH0.7511O0CKAeZXQGk0AgNAf7WEgBliWcrUd551DR-nWpE";
-const BIOMAX_USER = "rishav";
-const BIOMAX_PASS =  "admin";
+
+interface BiomaxConfig {
+  url: string;
+  user: string;
+  password: string;
+}
 
 function getSbHeaders() {
   return {
@@ -92,6 +96,7 @@ export default function App() {
   const [isSyncingUsers, setIsSyncingUsers] = useState(false);
   const [isRealtimeEnabled, setIsRealtimeEnabled] = useState(true);
   const [isSbConnected, setIsSbConnected] = useState<boolean | null>(null);
+  const [biomaxConfig, setBiomaxConfig] = useState<BiomaxConfig | null>(null);
   const [lastNotificationTime, setLastNotificationTime] = useState<number>(0);
   const lastSyncedTimes = useRef<Record<string, string>>({});
   const [dateRange, setDateRange] = useState({
@@ -106,11 +111,49 @@ export default function App() {
   }, [syncLogs]);
 
   useEffect(() => {
-    if (isConfigured && !token) {
-      login();
+    if (isConfigured) {
       checkSbConnection();
+      fetchBiomaxConfig();
     }
   }, [isConfigured]);
+
+  useEffect(() => {
+    if (biomaxConfig && !token) {
+      login();
+    }
+  }, [biomaxConfig]);
+
+  const fetchBiomaxConfig = async () => {
+    try {
+      addLog("Fetching Biomax configuration from database...", "info");
+      const res = await fetch(`${SB_URL}/rest/v1/biomax_config?select=url,user,password&limit=1`, {
+        headers: {
+          ...getSbHeaders(),
+          "Range-Unit": "items",
+          "Prefer": "count=exact"
+        },
+      });
+      
+      if (!res.ok) {
+        const errText = await res.text();
+        if (res.status === 404) {
+          throw new Error("Table 'biomax_config' not found. Please create it in Supabase.");
+        }
+        throw new Error(`Database error (${res.status}): ${errText}`);
+      }
+      
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        setBiomaxConfig(data[0]);
+        addLog("Biomax configuration loaded successfully", "success");
+      } else {
+        addLog("No configuration found in 'biomax_config' table.", "warning");
+        addLog("Tip: Ensure you have added a row and enabled an RLS policy for 'anon' access.", "info");
+      }
+    } catch (err: any) {
+      addLog(`Config Load Error: ${err.message}`, "error");
+    }
+  };
 
   const checkSbConnection = async () => {
     try {
@@ -188,13 +231,16 @@ export default function App() {
   };
 
   const syncUsers = async () => {
-    if (!selectedDevice || !token) return;
+    if (!selectedDevice || !token || !biomaxConfig) return;
     setIsSyncingUsers(true);
     addLog(`Fetching users for ${selectedDevice.Name}...`, "info");
     
     try {
       const res = await fetch(`/api/biomax/User/GetAllUsersByDevice?DeviceKey=${selectedDevice.DeviceKey}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "x-biomax-url": biomaxConfig.url
+        },
       });
       if (!res.ok) throw new Error(`Failed to fetch users: ${await res.text()}`);
       
@@ -244,14 +290,17 @@ export default function App() {
   };
 
   const saveDeviceByKey = async () => {
-    if (!newDeviceKey || !token) return;
+    if (!newDeviceKey || !token || !biomaxConfig) return;
     setIsAddingDevice(true);
     addLog(`Searching for device with key: ${newDeviceKey}...`, "info");
     
     try {
       // 1. Fetch all devices from Biomax to find the one with this key
       const res = await fetch("/api/biomax/Device", {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "x-biomax-url": biomaxConfig.url
+        },
       });
       const allDevices: Device[] = await res.json();
       const found = allDevices.find(d => d.DeviceKey === newDeviceKey);
@@ -297,12 +346,16 @@ export default function App() {
   };
 
   const login = async (retryCount = 0) => {
+    if (!biomaxConfig) return;
     try {
       addLog("Authenticating with Biomax API...", "info");
       const res = await fetch("/api/biomax/Auth/Login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ Username: BIOMAX_USER, Password: BIOMAX_PASS }),
+        headers: { 
+          "Content-Type": "application/json",
+          "x-biomax-url": biomaxConfig.url
+        },
+        body: JSON.stringify({ Username: biomaxConfig.user, Password: biomaxConfig.password }),
       });
       
       if (!res.ok) {
@@ -329,10 +382,14 @@ export default function App() {
   };
 
   const fetchDevices = async (authToken: string) => {
+    if (!biomaxConfig) return;
     try {
       addLog("Fetching device list...", "info");
       const res = await fetch("/api/biomax/Device", {
-        headers: { Authorization: `Bearer ${authToken}` },
+        headers: { 
+          Authorization: `Bearer ${authToken}`,
+          "x-biomax-url": biomaxConfig.url
+        },
       });
       const data = await res.json();
       setDevices(Array.isArray(data) ? data : []);
@@ -390,7 +447,7 @@ export default function App() {
   };
 
   const performSync = async (device: Device, from: string, to: string, isAuto = false) => {
-    if (!token) return;
+    if (!token || !biomaxConfig) return;
     if (!isAuto) setIsSyncing(true);
     
     const prefix = isAuto ? "[Auto-Sync] " : "";
@@ -400,7 +457,11 @@ export default function App() {
       // 1. Download Logs
       const res2 = await fetch(`/api/biomax/DeviceCommand/DownloadLogsByDate?FromDate=${from}&ToDate=${to}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: { 
+          Authorization: `Bearer ${token}`, 
+          "Content-Type": "application/json",
+          "x-biomax-url": biomaxConfig.url
+        },
         body: JSON.stringify([device.DeviceKey]),
       });
       if (!res2.ok) throw new Error(`Download failed: ${await res2.text()}`);
@@ -409,7 +470,10 @@ export default function App() {
 
       // 2. Get Logs
       const logsRes = await fetch(`/api/biomax/DeviceLog/GetAllLogsByDate?FromDate=${from}&ToDate=${to}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          "x-biomax-url": biomaxConfig.url
+        },
       });
       if (!logsRes.ok) throw new Error(`Fetch failed: ${await logsRes.text()}`);
       
